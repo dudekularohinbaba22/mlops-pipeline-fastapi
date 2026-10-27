@@ -1,0 +1,57 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"   # weekly retrain, Mondays 03:00 UTC
+
+jobs:
+  test-and-train:
+    runs-on: ubuntu-latest
+    outputs:
+      promoted: ${{ steps.train.outputs.promoted }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: ruff check .
+      - run: pytest -q
+      - name: Train and gate
+        id: train
+        run: |
+          if python -m src.train; then echo "promoted=true" >> "$GITHUB_OUTPUT"; else echo "promoted=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@v4
+        if: steps.train.outputs.promoted == 'true'
+        with:
+          name: model
+          path: models/
+
+  build-and-push:
+    needs: test-and-train
+    if: github.ref == 'refs/heads/main' && needs.test-and-train.outputs.promoted == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: models/
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+      # Add your deploy step here (Render deploy hook, SSH to EC2, kubectl, etc.)
